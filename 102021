@@ -1,0 +1,283 @@
+WITH devices AS
+	(
+
+		SELECT
+			DISTINCT
+			UPPER(device_id)    AS s
+				   ,   fact_game_device_install.game_name
+				   ,   fact_game_device_install.platform
+				   ,   'Remerge'   AS  campaign_channel
+				   ,   grp
+                   ,   CASE WHEN LTV_IN_MICRO_CENTS >0 then 'Spender' ELSE 'Non Spender' END as spender_group --CASE WHEN LTV_IN_MICRO_CENTS > 0 THEN 'Spender'
+                         --   ELSE 'Non Spender'
+                       --END AS spender_group
+				   --, date_sent_to_remerge
+                    ,   CASE -- KKH Remerge:  CID27703, CID27704, CID27594, CID27705, CID27706, CID27593 -- cf CID23719 CID23718
+					       WHEN    remerge_devices.campaign_name = 'Android_99-2000_AllTime' AND remerge_devices.game_name =   'CovetFashion'
+						       THEN    'CID28632' -- 'CF_Android_ALL_Both_Video_AEO_fall_lapsed30d+payer1_CID28632'
+					       WHEN    remerge_devices.campaign_name = 'Android_2000-10000_AllTime'AND remerge_devices.game_name =   'CovetFashion'
+						       THEN    'CID28633' -- 'CF_Android_ALL_Both_Video_AEO_fall_lapsed30d+payer2_CID28633'
+                           WHEN    remerge_devices.campaign_name = 'Android_10000_AllTime' AND remerge_devices.game_name =   'CovetFashion'
+						       THEN    'CID28634' --'CF_Android_ALL_Both_Video_AEO_fall_lapsed30d+payer3_CID28634'
+					       WHEN    remerge_devices.campaign_name = 'iOS_99-2000_AllTime'AND remerge_devices.game_name =   'CovetFashion'
+						       THEN    'CID28636' --'CF_iOS_ALL_Both_Video_AEO_Fall_Lapsed30D+Payer1_CID28636'
+                            WHEN    remerge_devices.campaign_name = 'iOS_2000-10000_AllTime' AND remerge_devices.game_name =   'CovetFashion'
+						       THEN    'CID28637'-- 'CF_iOS_ALL_Both_Video_AEO_Fall_Lapsed30D+Payer2_CID28637'
+					       WHEN    remerge_devices.campaign_name = 'iOS_10000_AllTime'AND remerge_devices.game_name =   'CovetFashion'
+						       THEN    'CID28638' -- 'CF_iOS_ALL_Both_Video_AEO_Fall_Lapsed30D+Payer3_CID28638'
+			END     AS cid_key -- update the campaign name to match to the other source tables - spend_data_raw and singular_clicks_orc
+
+		FROM
+			glu.adhoc.remerge_devices
+				INNER JOIN
+			glu.dwh_dev.fact_game_device_install
+			ON
+				(       UPPER(remerge_devices.device_id)    =   fact_game_device_install.s
+					AND    remerge_devices.game_name            =   fact_game_device_install.game
+					AND    UPPER(remerge_devices.platform)     =   fact_game_device_install.platform
+					)
+
+		WHERE 
+				remerge_devices.campaign_name IN ('Android_99-2000_AllTime'
+, 'Android_2000-10000_AllTime'
+, 'Android_10000_AllTime'
+, 'iOS_99-2000_AllTime'
+, 'iOS_2000-10000_AllTime'
+, 'iOS_10000_AllTime') -- campaign name in remerge devices table -- shamanth gave the name of campaign
+		  AND remerge_devices.game_name =     'CovetFashion' --- game name
+		  AND date_sent_to_remerge >= DATE('2021-09-10') --AND  DATE('2021-08-31') -- campaign dates
+	)   -- select * from devices order by date_sent_to_remerge ;
+    -- select count(s), grp, spender_group -- sum(case when spender_group = 'Non Spender' THEN 1 Else 0 END)  non_spender
+           --sum(case when spender_group = 'Spender' THEN 1 Else 0 END)  spender 
+          -- from devices
+         --  group by grp, spender_group 
+        --   order by spender_group desc;
+    
+  
+    
+    
+    , 
+    players_group AS
+   (
+
+SELECT
+	game_name
+		,   platform
+		--,   campaign_channel
+		,   cid_key
+		,   SUM(CASE
+	WHEN grp = 'TEST'
+	THEN 1
+	ELSE 0
+	END) AS number_of_players_in_test_grp
+		,   SUM(CASE
+	WHEN grp = 'CONTROL'
+	THEN 1
+	ELSE 0
+	END) AS number_of_players_in_control_grp
+FROM
+	devices
+
+GROUP BY
+	1,2,3
+
+	) -- select * from players_group;
+    , 
+	snapshot_users
+	AS
+	(
+SELECT
+	devices.s
+		,   devices.cid_key --campaign_name
+		,   devices.game_name
+		,   devices.platform
+		,   devices.campaign_channel
+		,   devices.grp
+        ,   devices.spender_group
+		,   MIN(first_session_date) first_session_date
+FROM
+	devices
+
+	LEFT OUTER JOIN
+	(SELECT
+	s
+		,   game_name
+		,   MIN(the_date) AS first_session_date
+	FROM
+	glu.adrift.game_device_daily_snapshot
+	WHERE
+	the_date >= DATE('2021-09-10')
+	GROUP BY
+	1,2
+	) as snapshot
+ON
+	devices.s           =   snapshot.s
+	AND devices.game_name   =   snapshot.game_name
+group by 1,2,3,4,5,6,7
+	) -- select * from snapshot_users order by first_session_date;
+		,
+	device_clicks AS
+	(
+SELECT
+	s
+		,   cid_key
+		,   game_name
+		,   platform
+		,   campaign_channel
+		,   grp
+        ,   spender_group
+		,   has_click
+	-- ,   LEAST(COALESCE(first_session_date ,first_click_date), COALESCE(first_click_date , first_session_date)) AS  first_activity_date  -- which is correct?
+		,   COALESCE(first_click_date , first_session_date) AS  first_activity_date
+		,   first_session_date
+		,   first_click_date
+FROM(
+	SELECT
+	snapshot_users.s
+		,   snapshot_users.cid_key
+		,   snapshot_users.game_name
+		,   snapshot_users.platform
+		,   snapshot_users.campaign_channel
+		,   snapshot_users.grp
+        ,   snapshot_users.spender_group
+		,   CASE WHEN clicks.s IS NOT NULL THEN 1 ELSE 0 END AS has_click
+		,   MIN(first_session_date)     AS first_session_date
+		,   MIN(first_click_date)       AS  first_click_date
+	FROM
+	snapshot_users
+
+	LEFT OUTER JOIN -- full outer join?
+
+	( SELECT
+	UPPER(s) AS s
+		,   cid_key
+		,   MIN(click_date)    AS  first_click_date
+
+	FROM
+	glu.dwh_dev.ua_singular_clicks clicks
+
+
+	WHERE
+	cid_key IN (
+	  'CID28632'
+	  , 'CID28633'
+      , 'CID28634'
+      , 'CID28636'
+      , 'CID28637'
+      , 'CID28638'
+    ) --- change campaign name -- Remerge:  CID27703, CID27704, CID27594, CID27705, CID27706, CID27593
+	AND PARTITION_DATE >= DATE('2021-09-10') -- change the dates here
+
+	GROUP BY
+	1,2 
+	) AS clicks
+	ON
+	UPPER(snapshot_users.s)=UPPER(clicks.s)
+	AND
+	UPPER(clicks.cid_key)=UPPER(snapshot_users.cid_key)
+	GROUP BY 1,2,3,4,5,6,7,8
+	))   -- select * from device_clicks; where has_click>0 order by first_click_date ;
+    ,
+	reengaged_users AS
+	(   SELECT
+	game_name
+		,   platform
+		,   campaign_channel
+		,   cid_key
+		,   SUM(CASE
+	WHEN grp = 'TEST'
+	THEN has_click
+	ELSE 0
+	END) AS number_of_test_users_with_clicks
+		,   SUM(CASE
+	WHEN grp = 'CONTROL'
+	THEN has_click
+	ELSE 0
+	END) AS number_of_control_users_with_clicks
+		,   SUM(CASE
+	WHEN grp = 'TEST'
+	THEN 1
+	ELSE 0
+	END) AS number_of_test_reengaged_users
+		,   SUM(CASE
+	WHEN grp = 'CONTROL'
+	THEN 1
+	ELSE 0
+	END) AS number_of_control_reengaged_users
+FROM
+	device_clicks
+WHERE
+	first_activity_date is NOT NULL
+GROUP BY
+	1,2,3,4
+	)
+		
+    ,revenue AS
+	(
+SELECT
+	--device_clicks.campaign_name
+		   device_clicks.game_name
+		,   device_clicks.platform
+		--,   device_clicks.campaign_channel
+        ,   device_clicks.grp
+        ,   device_clicks.spender_group
+        ,   device_clicks.cid_key 
+		,   SUM(case when device_clicks.first_activity_date=snapshot.the_date then net_revenue else 0 end)                AS          d1_net_revenue
+		,   SUM(CASE
+	WHEN has_click=1 and device_clicks.first_activity_date=snapshot.the_date
+	THEN (net_revenue)
+	ELSE 0
+	END)                        AS      with_click_d1_net_revenue
+        ,   SUM(case when snapshot.the_date BETWEEN device_clicks.first_activity_date AND DATEADD(DAY,6,device_clicks.first_activity_date) then net_revenue else 0 end)                
+      AS          d7_net_revenue
+		,   SUM(CASE
+	WHEN has_click=1 and snapshot.the_date BETWEEN device_clicks.first_activity_date AND DATEADD(DAY,6,device_clicks.first_activity_date)
+	THEN (net_revenue)
+	ELSE 0
+	END)                        AS      with_click_d7_net_revenue
+      ,   SUM(case when snapshot.the_date BETWEEN device_clicks.first_activity_date AND DATEADD(DAY,29,device_clicks.first_activity_date) then net_revenue else 0 end)                
+      AS          d30_net_revenue
+		,   SUM(CASE
+	WHEN has_click=1 and (snapshot.the_date BETWEEN device_clicks.first_activity_date AND DATEADD(DAY,29,device_clicks.first_activity_date))
+	THEN (net_revenue)
+	ELSE 0
+	END)                        AS      with_click_d30_net_revenue
+		
+FROM
+	device_clicks
+	LEFT OUTER JOIN
+	glu.adrift.game_device_daily_snapshot snapshot
+
+ON
+	device_clicks.s=snapshot.s
+	AND     device_clicks.game_name=snapshot.game_name
+	
+
+GROUP BY 1,2,3,4,5
+	) 
+
+    
+    -- KKH Remerge:  CID27703, CID27704, CID27594, CID27705, CID27706, CID27593
+, final as (SELECT
+	*
+FROM
+	players_group
+		LEFT OUTER JOIN
+	reengaged_users
+	USING
+		(    game_name
+			,    platform
+			--,    campaign_channel
+			,    cid_key
+			)
+		LEFT OUTER JOIN
+	revenue
+	USING
+		(    game_name
+			,    platform
+			--,    campaign_channel
+			,    cid_key
+			))
+            
+            SELECT * FROM final;
+   
