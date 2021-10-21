@@ -180,7 +180,7 @@ WHERE
 	first_activity_date is NOT NULL
 GROUP BY
 	1,2,3,4
-	) select * from reengaged_users;
+	) -- select * from reengaged_users;
 		
     ,daily_revenue AS
 	(
